@@ -1,0 +1,126 @@
+# ==============================================================================
+#  PenguScript - Archivo Completo de Prueba para Validación del Compilador
+# ==============================================================================
+
+###
+Módulo de físicas y utilidades gráficas para pruebas de Lexer y Parser.
+Maneja tipos primitivos, estructuras, colecciones y flujos complejos.
+###
+
+module physics
+
+use_cpp <iostream>
+use_cpp <vector>
+use_cpp <string>
+use_cpp <expected>
+use_cpp <string_view>
+use_cpp <memory>
+
+# ------------------------------------------------------------------------------
+# 1. Enums y Estructuras (Definiciones de Ámbito Global)
+# ------------------------------------------------------------------------------
+
+enum SpaceType
+  Dimension2D
+  Dimension3D
+
+struct Vector2
+  x: float
+  y: float
+
+struct Particle
+  name: std.string
+  position: Vector2
+  velocity: Vector2
+  mass: double
+
+# Separación estricta de estructura e implementación (impl)
+impl Particle
+  # Constructor con inicialización de ámbito nativo
+  constructor(name: std.string, x: float, y: float, m: double) ->
+    this.name = name
+    this.position.x = x
+    this.position.y = y
+    this.velocity.x = 0.0
+    this.velocity.y = 0.0
+    this.mass = m
+
+  destructor() ->
+    printf("Particle destroyed\n")
+
+  # Métodos con expresiones y operadores avanzados
+  update = (dt: float): void ->
+    this.position.x += this.velocity.x * dt
+    this.position.y += this.velocity.y * dt
+
+# ------------------------------------------------------------------------------
+# 2. Funciones Globales y Manejo de Errores Avanzado (std.expected)
+# ------------------------------------------------------------------------------
+
+# Retorna éxito (double) o error limpio (std.string_view) sin usar asteriscos '*'
+calculate_energy = (p: ref Particle): std.expected<double, std.string_view> ->
+  if p.mass <= 0.0
+    return std.unexpected("Error: Mass must be greater than zero")
+  
+  const speed_sq = (p.velocity.x * p.velocity.x) + (p.velocity.y * p.velocity.y)
+  const kinetic_energy = 0.5 * p.mass * speed_sq
+  return kinetic_energy
+
+# ------------------------------------------------------------------------------
+# 3. Función Principal: Evaluación de Flujos, Inicializadores y Expresiones
+# ------------------------------------------------------------------------------
+
+main = (): int ->
+  # Variables, Mutabilidad e Inferencia Léxica
+  var dt = 0.01667                       # Infiere float/double
+  const max_particles = 3                # Inmutable
+  var default_label = "Unassigned"       # Infiere const char* sin asterisco visible
+  
+  # Inicialización estática de arreglo nativo C++ (Traducción de corchetes [])
+  var raw_matrix: int[2] = [10, 20]
+
+  # Punteros Inteligentes Invisibles (Acceso uniforme con '.')
+  var p_ptr = std.make_unique<Particle>("Electron", 0.0, 0.0, 9.11e-31)
+  p_ptr.velocity.x = 2500.0
+  p_ptr.velocity.y = -1500.0
+
+  # Condicionales como expresiones (Operador Ternario)
+  const status_msg = if p_ptr.velocity.x > 0.0 then "Moving Right" else "Static or Left"
+
+  # Condicional con asignación de ámbito (C++17 If-Init) e inicializadores
+  if const energy_result = calculate_energy(ref p_ptr)
+    std.cout << "Energy: " << energy_result.value! << std.endl
+  else if energy_result.error! == "Error: Mass must be greater than zero"
+    std.cout << "Critical: " << energy_result.error! << std.endl
+  else
+    std.cout << "Unknown simulation error" << std.endl
+
+  # Modificador condicional posterior
+  p_ptr.update(dt) if dt > 0.0
+
+  # Evaluación de Switch Expressions con lambdas autoejecutables (IIFE)
+  const current_space = SpaceType.Dimension2D
+  const dimensions = switch current_space
+    when SpaceType.Dimension2D
+      2
+    when SpaceType.Dimension3D
+      3
+    else
+      0
+
+  # El único bucle universal: for (en variante clásica y for/in)
+  for i = 0; i < max_particles; i++
+    printf("Simulating step %d\n", i)
+
+  # Comprensión de Listas (List Comprehension inyectando lambdas en C++)
+  var sample_list: std.vector<int> = [1, 2, 3]
+  const squared_list: std.vector<int> = for num in sample_list
+    num * num
+
+  # Definición de Funciones Lambda con Flechas Dobles y Ejecución Explicita '!'
+  const logger = (msg: std.string_view): void =>
+    std.cout << "[LOG]: " << msg << std.endl
+
+  logger!("Simulation finished successfully")
+
+  return 0
