@@ -394,7 +394,7 @@ class TypeChecker:
   def check_enum_declaration(self, node: EnumDeclaration) -> None:
     pass
 
-  def check_block(self, node: Block) -> None:
+  def check_block(self, node: Block) -> TypeNode:
     scope = getattr(node, "scope", None)
     if scope:
       self.table.scope_stack.append(scope)
@@ -402,10 +402,12 @@ class TypeChecker:
     else:
       self.table.enter_scope("block")
       
+    last_t = None
     for stmt in node.statements:
-      self.check(stmt)
+      last_t = self.check(stmt)
       
     self.table.exit_scope()
+    return last_t if last_t else TypeNode(name="void")
 
   def check_variable_declaration(self, node: VariableDeclaration) -> None:
     val_type = self.check(node.value)
