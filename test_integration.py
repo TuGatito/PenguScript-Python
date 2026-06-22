@@ -23,6 +23,19 @@ def run_unit_tests() -> None:
     print("\nRunning parser unit tests...")
     import parser.parser as parser_module
     parser_module.test_parser()
+
+    # Run semantic analysis Phase 0 tests
+    print("\nRunning semantic symbol table unit tests...")
+    import semantic.symbol_table as sym_module
+    sym_module.test_symbol_table()
+
+    print("\nRunning semantic builtins unit tests...")
+    import semantic.builtins as builtins_module
+    builtins_module.test_builtins()
+
+    print("\nRunning semantic type checker unit tests...")
+    import semantic.type_checker as type_module
+    type_module.test_type_checker()
     
     print("\nAll component unit tests passed successfully!")
 
@@ -143,6 +156,25 @@ def run_integration_test() -> None:
     assert isinstance(raw_matrix_decl.type, TypeNode)
     assert raw_matrix_decl.type.name == "int"
     assert raw_matrix_decl.type.array_size == 2, f"Expected array_size=2, got {raw_matrix_decl.type.array_size}"
+    # Resolve semantic names in test_compiler.txt to verify no undeclared/shadowed errors
+    print("Resolving semantic names in AST...")
+    from semantic.resolver import Resolver
+    resolver = Resolver()
+    resolver.resolve(ast)
+    
+    print("Running type checker on AST...")
+    from semantic.type_checker import TypeChecker
+    checker = TypeChecker(resolver.table, resolver.errors, resolver.source_cache)
+    checker.check(ast)
+    
+    # Filter out warnings for strict error checks
+    errors = [e for e in resolver.errors if not e.is_warning]
+    for warning in [e for e in resolver.errors if e.is_warning]:
+        print(f"  Warning: {warning}")
+    for err in errors:
+        print(f"  Error: {err}")
+        
+    assert len(errors) == 0, f"Expected 0 semantic errors in test_compiler.txt, got {len(errors)}"
     
     print("Integration test passed successfully!")
 

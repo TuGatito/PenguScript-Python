@@ -1,5 +1,6 @@
 from lexer.lexer import Lexer
 from parser.declarations import DeclarationParser
+from semantic.semantic import SemanticAnalyzer
 
 def main() -> None:
     try:
@@ -20,6 +21,11 @@ def main() -> None:
     parser = DeclarationParser(tokens, filename)
     ast = parser.parse_program()
     DeclarationParser.pretty_print(ast)
+    
+    print("\n--- Running Semantic Analysis ---")
+    analyzer = SemanticAnalyzer()
+    errors = analyzer.analyze(ast)
+    print(SemanticAnalyzer.format_diagnostics(errors))
 
 if __name__ == "__main__":
     main()

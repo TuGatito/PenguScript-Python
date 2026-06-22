@@ -26,7 +26,6 @@ const y = 20                              # Immutable, infers type (C++ const au
 ref z: int = x                            # C++ Native Reference (int &z = x)
 var msg = "Hello"                         # Safe read-only string literal (const char*)
 var dynamic: std.string = "World"         # Explicit dynamic string allocation
-
 ```
 
 ### 2. Error Handling via C++23 `std::expected`
@@ -54,7 +53,6 @@ main = (): int ->
 
   std.cout << "Success: " << result.value! << std.endl
   return 0
-
 ```
 
 ### 3. Structural Composition (`struct` & `impl`)
@@ -76,7 +74,6 @@ impl Point
 
   add = (other_x: int, other_y: int): int ->
     return this.x + other_x
-
 ```
 
 ---
@@ -85,39 +82,122 @@ impl Point
 
 PenguScript utilizes a hand-crafted, high-performance **Recursive Descent Parser** architecture modeled after modern systems compilers like Zig, V, and Go.
 
-Current architecture components being migrated to the pipeline:
+The compiler is implemented in Python (for bootstrapping) and is designed to be **self-hosting** in the near future.
+
+### Pipeline Overview
 
 ```
-Source Code (.pengu) ──> [ Lexer ] ──> Token Stream ──> [ Parser ] ──> AST ──> [ Transpiler ] ──> Single C++ File (.cc)
-
+Source Code (.pengu)
+       ↓
+  [ Lexer ] → Tokens
+       ↓
+  [ Parser ] → AST (with source positions)
+       ↓
+  [ Semantic Analysis ] → Annotated AST (types, symbol resolution)
+       ↓
+  [ C++ Code Generator ] → Single .cc file (Unity Build)
+       ↓
+  [ C++ Compiler (g++/clang) ] → Executable / Library
 ```
 
-### Current Status:
+### Current Implementation Status
 
-- [x] **Lexer (`lexer.py`)**: 100% complete, fully custom machine-state tokenizer. Handles single/multi-line tracking, Windows/Unix line-ending normalizations, and safely manages physical indentation scopes emitting virtual `INDENT`/`DEDENT` tokens.
-- [x] **Tokens (`token.py`)**: 100% complete, featuring robust caret-pointing error context generation for Clang/Rust-like diagnostics.
-- [x] **AST Tree Nodes (`ast_nodes.py`)**: In progress.
-- [x] **Parser (`parser.py`)**: In progress.
+| Component                             | Status     | Description                                                                                                                                                                                    |
+| ------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Lexer** (`lexer/`)                  | ✅ 100%    | Full machine-state tokenizer, handles indentation (INDENT/DEDENT), comments (`#` and `###`), Unicode line endings, and precise position tracking.                                              |
+| **Tokens** (`token.py`)               | ✅ 100%    | Rich token representation with location info, caret‑pointing error context, and file metadata.                                                                                                 |
+| **AST Nodes** (`ast/ast_nodes.py`)    | ✅ 100%    | Complete node hierarchy covering all language constructs (literals, operators, control flow, functions, structs, enums, modules, imports, and C++ integration).                                |
+| **Parser** (`parser/`)                | ✅ 100%    | Pratt‑style expression parser with precedence; fully implemented for all statements, declarations, lambdas, structs, enums, modules, and imports. Supports single‑line and block‑based syntax. |
+| **Semantic Analysis** (`semantic/`)   | ✅ 100%    | Complete semantic analysis pipeline with symbol table, name resolution, type checking, and shadowing detection. Supports if‑init, comprehensive type inference, and Rust‑style diagnostics.    |
+| **C++ Code Generator** (`codegen/`)   | 🚧 Planned | Will generate clean, well‑formatted C++ code with proper RAII, namespaces, and Unity Build output.                                                                                             |
+| **Build System / Driver** (`driver/`) | 🚧 Planned | Cargo‑like CLI with incremental builds, error reporting, and self‑hosting bootstrap.                                                                                                           |
+
+### Error Reporting
+
+The compiler features **Rust/Cargo‑style diagnostics** with coloured output, precise span highlighting, and contextual hints. Errors are collected and reported in a non‑blocking manner, allowing multiple issues to be surfaced in a single run.
+
+Example:
+
+```
+error[E0308]: mismatched types
+  --> src/main.pengu:10:12
+   |
+10 |   var x: int = "hello"
+   |              ^^^^^^^^^ expected `int`, found `std.string`
+   |
+help: consider using `std.stoi` to convert the string to an integer
+```
 
 ---
 
 ## 📦 How to Explore (Development Version)
 
-The current host compiler implementation is being written in Python using strict types to perfectly map the architectural structures required for the imminent self-hosting translation phase.
+The host compiler is written in Python 3.10+ with strict typing, making the codebase easy to extend and debug while we transition to self‑hosting.
 
-### Running the Tokenizer Test Bench:
+### Quick Start
 
-1. Clone this repository.
-2. Ensure you have Python 3.10+ installed.
-3. Run the compiler entry point against a script:
+1. Clone the repository.
+2. Install Python 3.10 or newer.
+3. Run the compiler against a source file:
 
 ```bash
 python main.py compile path/to/your_file.pengu
+```
 
+### Build Pipeline
+
+- `compile` – generates a single `.cc` file and optionally compiles it with g++/clang.
+- `build` – performs a full build with dependency resolution.
+- `run` – compiles and executes the generated binary.
+- `test` – runs the test suite (unit and integration).
+- `watch` – watches for changes and recompiles automatically.
+
+### Configuration
+
+PenguScript uses a simple `PenguScript.toml` (or `penguscript.json`) for project settings, similar to `Cargo.toml`. Example:
+
+```toml
+[project]
+name = "my_app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# future support for external PenguScript modules
+```
+
+---
+
+## 🔄 Self‑Hosting Roadmap
+
+We are actively working toward compiling the compiler itself in PenguScript. The plan is:
+
+1. **Write the compiler in PenguScript** – using the language’s own features.
+2. **Bootstrap** – compile this source with the existing Python implementation.
+3. **Generate a C++ executable** from the PenguScript compiler.
+4. **Use that executable** to recompile itself, achieving a fully self‑hosted toolchain.
+
+This approach ensures that the language stays pragmatic, minimal, and free from external library bloat.
+
+---
+
+## 🧪 Test Suite
+
+A comprehensive test suite is included to verify the correctness of each compiler phase:
+
+- `test_lexer.py` – tokenizer correctness.
+- `test_parser.py` – AST generation and syntax validation.
+- `test_semantic.py` – symbol resolution and type checking.
+- `test_codegen.py` – C++ output against expected patterns.
+
+Run all tests with:
+
+```bash
+python -m unittest discover tests
 ```
 
 ---
 
 ## 📄 License
 
-This project is licensed under the Apache License 2.0 - see the LICENSE file for details. This grants permissions for commercial use, modification, distribution, patent use, and private use under the condition that license and copyright notices are preserved.
+This project is licensed under the Apache License 2.0 – see the LICENSE file for details. This grants permissions for commercial use, modification, distribution, patent use, and private use under the condition that license and copyright notices are preserved.
