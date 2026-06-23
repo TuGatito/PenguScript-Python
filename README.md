@@ -102,15 +102,15 @@ Source Code (.pengu)
 
 ### Current Implementation Status
 
-| Component                             | Status     | Description                                                                                                                                                                                    |
-| ------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Lexer** (`lexer/`)                  | ✅ 100%    | Full machine-state tokenizer, handles indentation (INDENT/DEDENT), comments (`#` and `###`), Unicode line endings, and precise position tracking.                                              |
-| **Tokens** (`token.py`)               | ✅ 100%    | Rich token representation with location info, caret‑pointing error context, and file metadata.                                                                                                 |
-| **AST Nodes** (`ast/ast_nodes.py`)    | ✅ 100%    | Complete node hierarchy covering all language constructs (literals, operators, control flow, functions, structs, enums, modules, imports, and C++ integration).                                |
-| **Parser** (`parser/`)                | ✅ 100%    | Pratt‑style expression parser with precedence; fully implemented for all statements, declarations, lambdas, structs, enums, modules, and imports. Supports single‑line and block‑based syntax. |
-| **Semantic Analysis** (`semantic/`)   | ✅ 100%    | Complete semantic analysis pipeline with symbol table, name resolution, type checking, and shadowing detection. Supports if‑init, comprehensive type inference, and Rust‑style diagnostics.    |
-| **C++ Code Generator** (`codegen/`)   | ✅ 100%    | Will generate clean, well‑formatted C++ code with proper RAII, namespaces, and Unity Build output.                                                                                             |
-| **Build System / Driver** (`driver/`) | 🚧 Planned | Cargo‑like CLI with incremental builds, error reporting, and self‑hosting bootstrap.                                                                                                           |
+| Component                             | Status  | Description                                                                                                                                                                                    |
+| ------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Lexer** (`lexer/`)                  | ✅ 100% | Full machine-state tokenizer, handles indentation (INDENT/DEDENT), comments (`#` and `###`), Unicode line endings, and precise position tracking.                                              |
+| **Tokens** (`token.py`)               | ✅ 100% | Rich token representation with location info, caret‑pointing error context, and file metadata.                                                                                                 |
+| **AST Nodes** (`ast/ast_nodes.py`)    | ✅ 100% | Complete node hierarchy covering all language constructs (literals, operators, control flow, functions, structs, enums, modules, imports, and C++ integration).                                |
+| **Parser** (`parser/`)                | ✅ 100% | Pratt‑style expression parser with precedence; fully implemented for all statements, declarations, lambdas, structs, enums, modules, and imports. Supports single‑line and block‑based syntax. |
+| **Semantic Analysis** (`semantic/`)   | ✅ 100% | Complete semantic analysis pipeline with symbol table, name resolution, type checking, and shadowing detection. Supports if‑init, comprehensive type inference, and Rust‑style diagnostics.    |
+| **C++ Code Generator** (`codegen/`)   | ✅ 100% | Generates clean, well‑formatted C++ code with proper RAII, namespaces, and Unity Build output.                                                                                                 |
+| **Build System / Driver** (`driver/`) | ✅ 100% | Cargo‑like CLI with incremental builds, error reporting, and self‑hosting bootstrap.                                                                                                           |
 
 ### Error Reporting
 

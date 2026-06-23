@@ -1,0 +1,11 @@
+{
+  "name": "test_compiler",
+  "version": "0.1.0",
+  "type": "executable",
+  "main": "test_compiler.pengu",
+  "src_dirs": ["."],
+  "include_dirs": [],
+  "lib_dirs": [],
+  "profile": "debug",
+  "cpp_standard": "c++23"
+}

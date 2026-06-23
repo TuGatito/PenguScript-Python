@@ -385,6 +385,7 @@ def test_unity_builder() -> None:
     "} // namespace physics\n"
     "\n"
     "int main() {\n"
+    "  using namespace physics;\n"
     "  return 0;\n"
     "}"
   )
@@ -425,6 +426,7 @@ def test_unity_builder() -> None:
     "} // namespace physics\n"
     "\n"
     "int main() {\n"
+    "  using namespace physics;\n"
     "  return 0;\n"
     "}"
   )

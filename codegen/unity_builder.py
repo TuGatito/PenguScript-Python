@@ -67,6 +67,7 @@ class UnityBuilder:
       return modules[name]
 
     main_decl_node = None
+    main_module = None
 
     for prog in programs:
       current_module = None
@@ -79,10 +80,12 @@ class UnityBuilder:
           continue
         elif isinstance(stmt, FunctionDeclaration) and stmt.name.name == "main":
           main_decl_node = stmt
+          main_module = current_module
           continue
         elif hasattr(stmt, "name") and getattr(stmt.name, "name", None) == "main":
           # Just in case it's parsed as VariableDeclaration/AssignmentStatement
           main_decl_node = stmt
+          main_module = current_module
           continue
 
         bucket = get_module_bucket(current_module)
@@ -151,6 +154,11 @@ class UnityBuilder:
     # Main function at the global scope at the very end
     if main_decl_node:
       code = visitor.visit(main_decl_node)
+      if code and main_module:
+        lines = code.splitlines()
+        if lines and "{" in lines[0]:
+          lines.insert(1, f"  using namespace {main_module};")
+          code = "\n".join(lines)
       if code:
         for line in code.splitlines():
           printer.write_line(line)
