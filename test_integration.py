@@ -40,13 +40,13 @@ def run_unit_tests() -> None:
     print("\nAll component unit tests passed successfully!")
 
 def run_integration_test() -> None:
-    print("\n--- Running Integration Test on test_compiler.txt ---")
+    print("\n--- Running Integration Test on test_compiler.pengu ---")
     
     from lexer.lexer import Lexer
     from parser.declarations import DeclarationParser
     from ast.ast_nodes import Program, TypeNode, IfExpression
     
-    test_file = "test_compiler.txt"
+    test_file = "test_compiler.pengu"
     if not os.path.exists(test_file):
         raise FileNotFoundError(f"Could not find integration test file: {test_file}")
         
@@ -71,7 +71,7 @@ def run_integration_test() -> None:
     assert ast.statements[0].name.name == "physics", f"Expected module name physics, got {ast.statements[0].name.name}"
     
     # Let's perform validation of type is_ref attribute update
-    # In test_compiler.txt:
+    # In test_compiler.pengu:
     # calculate_energy = (p: ref Particle): std.expected<double, std.string_view> -> ...
     # We want to verify that `p` parameter type standard check yields `is_ref=True`.
     
@@ -156,7 +156,7 @@ def run_integration_test() -> None:
     assert isinstance(raw_matrix_decl.type, TypeNode)
     assert raw_matrix_decl.type.name == "int"
     assert raw_matrix_decl.type.array_size == 2, f"Expected array_size=2, got {raw_matrix_decl.type.array_size}"
-    # Resolve semantic names in test_compiler.txt to verify no undeclared/shadowed errors
+    # Resolve semantic names in test_compiler.pengu to verify no undeclared/shadowed errors
     print("Resolving semantic names in AST...")
     from semantic.resolver import Resolver
     resolver = Resolver()
@@ -174,7 +174,7 @@ def run_integration_test() -> None:
     for err in errors:
         print(f"  Error: {err}")
         
-    assert len(errors) == 0, f"Expected 0 semantic errors in test_compiler.txt, got {len(errors)}"
+    assert len(errors) == 0, f"Expected 0 semantic errors in test_compiler.pengu, got {len(errors)}"
     
     print("Integration test passed successfully!")
 

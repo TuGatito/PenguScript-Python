@@ -138,7 +138,8 @@ class CppVisitor:
   def visit_unary_operator(self, node: UnaryOperator) -> str:
     op = node.operator
     if op == "not":
-      op = "!"
+      operand = self.visit(node.operand)
+      return f"!({operand})"
     
     operand = self.visit(node.operand)
     if op == "ref":
@@ -421,7 +422,7 @@ class CppVisitor:
     is_ref = (node.kind == "ref")
     
     use_auto_override = False
-    if node.type and is_const and node.value:
+    if node.type and node.value:
       type_name = node.type.name
       if type_name in ("std.expected", "std::expected"):
         use_auto_override = True
@@ -437,7 +438,11 @@ class CppVisitor:
         type_str = "auto"
         
     const_str = "const " if (is_const and not type_str.startswith("const ")) else ""
-    name = node.name.name
+    
+    array_suffix = ""
+    if node.type and node.type.array_size is not None:
+      array_suffix = f"[{node.type.array_size}]"
+    name = f"{node.name.name}{array_suffix}"
     
     if node.value:
       val_str = self.visit(node.value)
@@ -707,13 +712,9 @@ class CppVisitor:
       if isinstance(func_node, Identifier) and func_node.name in ("printf", "scanf"):
         self.includes.add("<cstdio>")
     elif isinstance(node, TypeNode):
-      if node.array_size is not None:
-        self.includes.add("<array>")
       name = node.name
       if name in ("std.vector", "std::vector"):
         self.includes.add("<vector>")
-      elif name in ("std.array", "std::array"):
-        self.includes.add("<array>")
       elif name in ("std.string", "std::string", "string"):
         self.includes.add("<string>")
       elif name in ("std.unique_ptr", "std::unique_ptr", "std.shared_ptr", "std::shared_ptr", "std.make_unique", "std::make_unique", "std.make_shared", "std::make_shared"):
