@@ -1,0 +1,156 @@
+## psc/cmd/test.pengu — `psc test`.
+
+import std.archivum
+import std.builder
+import std.chronicle
+import std.compass
+import std.rites
+import std.spark
+
+import psc.cli.args as cliargs
+import psc.driver.build as driver
+import psc.os.proc as proc
+import psc.sema.names as npool
+
+insignia psc_cmd_test_
+
+## Ayuda.
+##
+## ## Memoria
+## No asigna.
+weave print_help into void:
+    calling spark.println with "Usage: psc test [TARGET] [options]"
+    calling spark.println with "  --profile=debug|release|small"
+    calling spark.println with "  --cc=NAME"
+    calling spark.println with "  --entry=PATH"
+    calling spark.println with "  --json"
+    calling spark.println with "  --watch"
+    calling spark.println with "  --verbose"
+    calling spark.println with "  --help"
+
+## Huella de un archivo/directorio.
+weave fingerprint with path as string into string:
+    var sb as StringBuilder is calling StringBuilder.new
+    defer banish sb
+    var abs as string is calling compass.cp_absolute with path
+    var files as list of string is list of string
+    if calling archivum.is_dir with abs:
+        set files is calling archivum.find_files with abs, true
+    else:
+        calling files.push with (calling copy with abs)
+    for f in files:
+        calling sb.append with f
+        var mt as maybe float is calling archivum.modified_time with f
+        if mt.is_present:
+            calling sb.append with ":"
+            calling sb.append_float with mt.value
+        banish mt
+        var sz as maybe int is calling archivum.file_size with f
+        if sz.is_present:
+            calling sb.append with ":"
+            calling sb.append_int with sz.value
+        banish sz
+        banish f
+    banish files
+    banish abs
+    return calling sb.finish
+
+## Implementa `psc test`.
+##
+## ## Memoria
+## Libera opciones/resultado.
+weave run_test with args as list of string into int:
+    var vf as list of string is list of string
+    calling vf.push with "--profile"
+    calling vf.push with "--cc"
+    calling vf.push with "--entry"
+    var sf as list of string is list of string
+    calling sf.push with "--json"
+    calling sf.push with "--watch"
+    calling sf.push with "--verbose"
+    var pr as cliargs.ParseResult is calling cliargs.parse with args, 2, vf, sf, list of string
+    if not pr.ok:
+        var e as string is pr.error
+        calling spark.eprintln with e
+        banish e
+        calling cliargs.free_parse_result with (sigil of pr)
+        return 2
+    if calling cliargs.enabled with (sigil of pr.args), "help":
+        calling print_help
+        calling cliargs.free_parse_result with (sigil of pr)
+        return 0
+    if calling cliargs.enabled with (sigil of pr.args), "--watch":
+        var childargs as list of string is list of string
+        for a in args:
+            if a != "--watch":
+                calling childargs.push with (calling copy with a)
+        var target as string is "."
+        if pr.args.positionals.len > 0:
+            set target is (pr.args.positionals at 0)
+        var fp0 as string is calling fingerprint with target
+        while true:
+            var rc as int is calling proc.run_argv with childargs
+            while true:
+                calling chronicle.sleep_ms with 300
+                var fp1 as string is calling fingerprint with target
+                if fp1 != fp0:
+                    banish fp0
+                    set fp0 is fp1
+                    break
+                banish fp1
+        banish fp0
+        banish childargs
+        calling cliargs.free_parse_result with (sigil of pr)
+        return 0
+    var o as driver.BuildOptions is calling driver.default_options
+    var prof as string is calling cliargs.value with (sigil of pr.args), "--profile"
+    if prof length > 0:
+        banish o.profile
+        set o.profile is calling copy with prof
+    var cc as string is calling cliargs.value with (sigil of pr.args), "--cc"
+    if cc length > 0:
+        banish o.cc
+        set o.cc is calling copy with cc
+    var ent as string is calling cliargs.value with (sigil of pr.args), "--entry"
+    if ent length > 0:
+        banish o.target
+        set o.target is calling copy with ent
+    else if pr.args.positionals.len > 0:
+        banish o.target
+        set o.target is calling copy with (pr.args.positionals at 0)
+    set o.is_test is true
+    set o.test_json is calling cliargs.enabled with (sigil of pr.args), "--json"
+    set o.verbose is calling cliargs.enabled with (sigil of pr.args), "--verbose"
+    var r as driver.BuildResult is calling driver.build with o
+    if not r.ok:
+        var e2 as string is r.error
+        var m as string is "psc test: {e2}"
+        calling spark.eprintln with m
+        banish m
+        calling driver.free_result with (sigil of r)
+        calling driver.free_options with (sigil of o)
+        calling cliargs.free_parse_result with (sigil of pr)
+        return 1
+    var art as string is r.artifact
+    var targv as list of string is list of string
+    calling targv.push with (calling copy with art)
+    var raw as int is calling proc.run_argv with targv
+    banish targv
+    var code as int is raw
+    if raw > 255:
+        set code is (raw / 256) % 256
+    if code < 0:
+        set code is 1
+    if code != 0 and code != 2:
+        set code is 1
+    calling driver.free_result with (sigil of r)
+    calling driver.free_options with (sigil of o)
+    calling cliargs.free_parse_result with (sigil of pr)
+    return code
+
+## Copia owned.
+##
+## ## Memoria
+## Devuelve string owned.
+weave copy with s as string into string:
+    return calling npool.copy_string with s

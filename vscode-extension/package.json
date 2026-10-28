@@ -1,0 +1,164 @@
+{
+    "name": "pengus",
+    "displayName": "PenguScript",
+    "description": "Language support, LSP intelligence, and cargo-like project management for PenguScript.",
+    "publisher": "pengus-lang",
+    "version": "3.0.3",
+    "icon": "./icons/pengu_icon.png",
+    "keywords": [
+        "pengus",
+        "penguscript",
+        "pengu",
+        "systems-programming",
+        "compiler",
+        "lsp",
+        "concepts",
+        "generics",
+        "omens",
+        "runes"
+    ],
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/pengus-lang/penguscript"
+    },
+    "engines": {
+        "vscode": "^1.80.0"
+    },
+    "categories": [
+        "Programming Languages",
+        "Snippets",
+        "Linters",
+        "Programming Language Features"
+    ],
+    "main": "./out/extension.js",
+    "activationEvents": [
+        "onLanguage:pengus"
+    ],
+    "contributes": {
+        "languages": [
+            {
+                "id": "pengus",
+                "aliases": [
+                    "PenguScript",
+                    "pengus",
+                    "pengu"
+                ],
+                "extensions": [
+                    ".pengu",
+                    ".pengus",
+                    ".d.pengu"
+                ],
+                "configuration": "./language-configuration.json",
+                "icon": {
+                    "light": "./icons/pengu_icon.png",
+                    "dark": "./icons/pengu_icon_white.png"
+                }
+            }
+        ],
+        "iconThemes": [
+            {
+                "id": "pengus-icons",
+                "label": "PenguScript Icons",
+                "path": "./icons/pengu_icon.png"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "pengus",
+                "scopeName": "source.pengus",
+                "path": "./syntaxes/pengus.tmLanguage.json"
+            }
+        ],
+        "snippets": [
+            {
+                "language": "pengus",
+                "path": "./snippets/pengus.json"
+            }
+        ],
+        "commands": [
+            {
+                "command": "pengus.build",
+                "title": "PenguScript: Build Project",
+                "category": "PenguScript"
+            },
+            {
+                "command": "pengus.run",
+                "title": "PenguScript: Run Project",
+                "category": "PenguScript"
+            },
+            {
+                "command": "pengus.test",
+                "title": "PenguScript: Run Tests",
+                "category": "PenguScript"
+            },
+            {
+                "command": "pengus.doc",
+                "title": "PenguScript: Generate Documentation",
+                "category": "PenguScript"
+            },
+            {
+                "command": "pengus.clean",
+                "title": "PenguScript: Clean Project",
+                "category": "PenguScript"
+            },
+            {
+                "command": "pengus.init",
+                "title": "PenguScript: Initialize New Project",
+                "category": "PenguScript"
+            },
+            {
+                "command": "pengus.selectExecutable",
+                "title": "PenguScript: Select pengu Executable",
+                "category": "PenguScript"
+            },
+            {
+                "command": "pengus.restartLsp",
+                "title": "PenguScript: Restart Language Server",
+                "category": "PenguScript"
+            },
+            {
+                "command": "pengus.showMenu",
+                "title": "PenguScript: Show Menu",
+                "category": "PenguScript"
+            }
+        ],
+        "configuration": {
+            "type": "object",
+            "title": "PenguScript",
+            "properties": {
+                "pengus.executablePath": {
+                    "type": "string",
+                    "default": "",
+                    "markdownDescription": "Path to the `pengu` executable (standalone release, `pengu.exe`, or a project's `.venv/bin/pengu`). When empty the extension searches `$PENGU_BIN_PATH`, then `PATH`, then the usual release locations (`./pengu`, `./.venv/bin/pengu`, `~/pengu/pengu`, `~/.local/bin/pengu`, `/usr/local/bin/pengu`)."
+                },
+                "pengus.defaultProfile": {
+                    "type": "string",
+                    "enum": [
+                        "debug",
+                        "release"
+                    ],
+                    "default": "debug",
+                    "description": "Default build profile ('debug' or 'release') used for build and run commands."
+                }
+            }
+        }
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run bundle",
+        "compile": "tsc -p ./",
+        "bundle": "esbuild ./src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
+        "watch": "tsc -watch -p ./",
+        "package": "npx @vscode/vsce package"
+    },
+    "devDependencies": {
+        "@types/node": "^18.14.6",
+        "@types/vscode": "^1.80.0",
+        "@vscode/vsce": "^2.22.0",
+        "esbuild": "^0.20.0",
+        "typescript": "^5.1.6"
+    },
+    "dependencies": {
+        "vscode-languageclient": "^9.0.1"
+    }
+}

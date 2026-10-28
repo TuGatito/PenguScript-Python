@@ -1,0 +1,425 @@
+## psc/cmd/doc.pengu — `psc doc` (Markdown básico F6).
+
+import std.archivum
+import std.builder
+import std.compass
+import std.scrolls
+import std.rites
+import std.spark
+
+import psc.cli.args as cliargs
+import psc.driver.manifest as manifest
+import psc.sema.modules.program as semprog
+import psc.sema.options as sopts
+import psc.sema.api as sema_api
+import psc.docgen.sig as dfsig
+import psc.sema.names as npool
+
+insignia psc_cmd_doc_
+
+## Ayuda.
+##
+## ## Memoria
+## No asigna.
+weave print_help into void:
+    calling spark.println with "Usage: psc doc [--output=DIR] [--entry=PATH]"
+    calling spark.println with "  --output=DIR   output directory (default: docs/api)"
+    calling spark.println with "  --entry=PATH   override entry"
+    calling spark.println with "  --help"
+
+## Copia owned.
+##
+## ## Memoria
+## Devuelve string owned.
+weave copy with s as string into string:
+    return calling npool.copy_string with s
+
+## Busca el manifiesto.
+##
+## ## Memoria
+## Devuelve string owned o `""`.
+weave find_root with start as string into string:
+    var d as string is calling compass.cp_absolute with start
+    var i as int is 0
+    while i < 8:
+        var f as string is "{d}/pengu.toml"
+        if calling archivum.is_file with f:
+            banish f
+            return calling copy with d
+        banish f
+        var parent as string is calling compass.cp_dirname with d
+        if parent == d:
+            banish parent
+            banish d
+            return ""
+        banish d
+        set d is parent
+        set i is i + 1
+    banish d
+    return ""
+
+## `true` si `s` empieza por `p`.
+##
+## ## Memoria
+## O(p).
+weave starts_with with s as string, p as string into bool:
+    var n as int is s length
+    var m as int is p length
+    if m > n:
+        return false
+    return (s at 0 to m) == p
+
+## `true` si `s` termina en `p`.
+##
+## ## Memoria
+## O(p).
+weave ends_with with s as string, p as string into bool:
+    var n as int is s length
+    var m as int is p length
+    if m > n:
+        return false
+    return (s at (n - m) to n) == p
+
+## `true` si `line` declara un símbolo documentable.
+weave is_decl with line as string into bool:
+    return (calling starts_with with line, "weave ") or (calling starts_with with line, "rune ") or (calling starts_with with line, "echo ") or (calling starts_with with line, "omen ") or (calling starts_with with line, "alias ") or (calling starts_with with line, "seal ") or (calling starts_with with line, "concept ") or (calling starts_with with line, "const ")
+
+## Firma legible de una declaración.
+##
+## ## Memoria
+## Devuelve string owned.
+weave signature_of with line as string into string:
+    var t as string is line
+    # quitar ':' final
+    if calling ends_with with t, ":":
+        var cut as int is t length - 1
+        var t2 as string is t at 0 to cut
+        banish t
+        set t is t2
+    if calling starts_with with t, "weave ":
+        var body as string is t at 6 to (t length)
+        var wi as int is 0
+        var wname as string is body
+        var with_i as int is -1
+        var into_i as int is -1
+        while wi < body length:
+            if with_i < 0 and wi + 6 <= body length and (body at wi to (wi + 6)) == " with ":
+                set with_i is wi
+                set wi is wi + 5
+            else if wi + 6 <= body length and (body at wi to (wi + 6)) == " into ":
+                set into_i is wi
+                set wi is wi + 5
+            set wi is wi + 1
+        if with_i >= 0:
+            set wname is body at 0 to with_i
+        else if into_i >= 0:
+            set wname is body at 0 to into_i
+        var ret as string is "void"
+        if into_i >= 0:
+            set ret is body at (into_i + 6) to (body length)
+        var params as string is ""
+        if with_i >= 0:
+            if into_i >= 0:
+                set params is body at (with_i + 6) to into_i
+            else:
+                set params is body at (with_i + 6) to (body length)
+        var params2 as string is calling scrolls.replace_all with params, " as ", ": "
+        var sig as string is "**{wname}**({params2}) -> {ret}"
+        banish ret
+        banish params
+        banish params2
+        banish wname
+        banish body
+        banish t
+        return sig
+    var sp as int is 0
+    while sp < t length and (t at sp to (sp + 1)) != " ":
+        set sp is sp + 1
+    if sp < t length:
+        var rest as string is t at (sp + 1) to (t length)
+        var nm as string is rest
+        var q as int is 0
+        while q < rest length:
+            var ch as string is rest at q to (q + 1)
+            if ch == " " or ch == ":" or ch == "(" or ch == "=":
+                set nm is rest at 0 to q
+                break
+            set q is q + 1
+        var sig2 as string is "**{nm}**"
+        banish nm
+        banish rest
+        banish t
+        return sig2
+    banish t
+    return "**?**"
+
+## Renderiza un archivo a Markdown.
+##
+## ## Memoria
+## Devuelve string owned.
+weave render_file with path as string, rel as string, p as ref to semprog.SemaProgram into string:
+    var sb as StringBuilder is calling StringBuilder.new
+    defer banish sb
+    var mn as string is calling basename_no_ext with path
+    calling sb.append with "# "
+    calling sb.append with mn
+    calling sb.append with "\n\n> Source: `"
+    calling sb.append with rel
+    calling sb.append with "`\n\n---\n\n"
+    banish mn
+    var kind_word as string is "symbol"
+    var txt as maybe string is calling archivum.read_text with path
+    if txt.is_present:
+        var ttext as string is txt.value
+        var lines as list of string is calling ttext.split with "\n"
+        var docs as list of string is list of string
+        var pi as int is 0
+        while pi < lines.len:
+            var line as string is (lines at pi)
+            var trimmed as string is line
+            # trim
+            var tb as ref to frozen byte is bytes of trimmed
+            var ts as int is 0
+            var te as int is trimmed length
+            while ts < te and (((tb at ts) to int) == 32 or ((tb at ts) to int) == 9):
+                set ts is ts + 1
+            while te > ts and (((tb at (te - 1)) to int) == 32 or ((tb at (te - 1)) to int) == 9):
+                set te is te - 1
+            if ts > 0 or te < trimmed length:
+                var tr2 as string is trimmed at ts to te
+                banish trimmed
+                set trimmed is tr2
+            if calling starts_with with trimmed, "##":
+                var d as string is trimmed at 2 to (trimmed length)
+                calling docs.push with d
+            else if calling is_decl with trimmed:
+                var sig as string is calling signature_of with trimmed
+                var nm as string is calling basename_no_ext with path
+                # heading: nombre simple
+                var hname as string is sig
+                var hs as int is 0
+                var he as int is sig length
+                while hs < he and (sig at hs to (hs + 1)) != "*":
+                    set hs is hs + 1
+                # extraer entre ** y **
+                var nstart as int is hs + 2
+                var ne as int is nstart
+                while ne < he and (sig at ne to (ne + 1)) != "*":
+                    set ne is ne + 1
+                if ne > nstart:
+                    var hn as string is sig at nstart to ne
+                    set hname is hn
+                var fsig as string is calling dfsig.signature_for with p, hname
+                if fsig length > 0:
+                    banish sig
+                    set sig is fsig
+                else:
+                    banish fsig
+                calling sb.append with "### `"
+                calling sb.append with hname
+                calling sb.append with "`\n\n> "
+                calling sb.append with sig
+                calling sb.append with "\n\n"
+                var fdoc as string is calling dfsig.doc_for with p, hname
+                if fdoc length > 0:
+                    calling sb.append with fdoc
+                    calling sb.append with "\n\n"
+                else if docs.len == 0:
+                    calling sb.append with "_Undocumented function._\n\n"
+                else:
+                    for d in docs:
+                        calling sb.append with d
+                        calling sb.append with "\n"
+                    calling sb.append with "\n"
+                for d in docs:
+                    banish d
+                set docs is list of string
+                banish hname
+                banish sig
+                banish nm
+                banish trimmed
+                set pi is pi + 1
+                continue
+            else if trimmed length > 0 and not (calling starts_with with trimmed, "#"):
+                for d in docs:
+                    banish d
+                set docs is list of string
+            banish trimmed
+            set pi is pi + 1
+        for d in docs:
+            banish d
+        banish docs
+        banish lines
+    banish txt
+    return calling sb.finish
+
+## Basename sin extensión.
+##
+## ## Memoria
+## Devuelve string owned.
+weave basename_no_ext with path as string into string:
+    var b as string is calling compass.cp_basename with path
+    defer banish b
+    if calling ends_with with b, ".pengu":
+        var cut as int is b length - 6
+        return calling copy with (b at 0 to cut)
+    return calling copy with b
+
+## Nombre de página documental a partir del path relativo.
+##
+## ## Memoria
+## Devuelve string owned.
+weave doc_name with rel as string into string:
+    var sb as StringBuilder is calling StringBuilder.new
+    defer banish sb
+    var b as ref to frozen byte is bytes of rel
+    var i as int is 0
+    while i < rel length:
+        var c as int is ((b at i) to int)
+        if c == 47 or c == 92:
+            calling sb.append with "_"
+        else:
+            calling sb.append_char with (c to char)
+        set i is i + 1
+    var full as string is calling sb.finish
+    if calling ends_with with full, ".pengu":
+        var cut as int is full length - 6
+        var o2 as string is full at 0 to cut
+        banish full
+        return o2
+    return full
+
+## Implementa `psc doc`.
+##
+## ## Memoria
+## Libera ParseResult.
+weave run_doc with args as list of string into int:
+    var vf as list of string is list of string
+    calling vf.push with "--output"
+    calling vf.push with "--entry"
+    calling vf.push with "--config"
+    var sf as list of string is list of string
+    calling sf.push with "--html"
+    calling sf.push with "--help"
+    var pr as cliargs.ParseResult is calling cliargs.parse with args, 2, vf, sf, list of string
+    if not pr.ok:
+        var e as string is pr.error
+        calling spark.eprintln with e
+        banish e
+        calling cliargs.free_parse_result with (sigil of pr)
+        return 2
+    if calling cliargs.enabled with (sigil of pr.args), "--help":
+        calling print_help
+        calling cliargs.free_parse_result with (sigil of pr)
+        return 0
+    var cwd as maybe string is calling rites.getcwd
+    if not cwd.is_present:
+        banish cwd
+        calling cliargs.free_parse_result with (sigil of pr)
+        return 2
+    var start as string is cwd.value
+    var cfg as string is calling cliargs.value with (sigil of pr.args), "--config"
+    if cfg length > 0:
+        set start is cfg
+    var root as string is calling find_root with start
+    if root length == 0:
+        calling spark.eprintln with "psc doc: no pengu.toml found"
+        banish root
+        banish cwd
+        calling cliargs.free_parse_result with (sigil of pr)
+        return 1
+    var man as manifest.Manifest is calling manifest.load_manifest with root, "debug"
+    if not man.ok:
+        var e2 as string is man.error
+        calling spark.eprintln with e2
+        calling manifest.free_manifest with (sigil of man)
+        banish root
+        banish cwd
+        calling cliargs.free_parse_result with (sigil of pr)
+        return 1
+    var out as string is calling copy with (calling cliargs.value with (sigil of pr.args), "--output")
+    if out length == 0:
+        set out is "{root}/docs/api"
+    if not calling archivum.create_dir with out, true:
+        calling spark.eprintln with "psc doc: cannot create output directory"
+        calling manifest.free_manifest with (sigil of man)
+        banish root
+        banish cwd
+        calling cliargs.free_parse_result with (sigil of pr)
+        return 1
+    var entry as string is calling cliargs.value with (sigil of pr.args), "--entry"
+    if entry length == 0:
+        banish entry
+        set entry is calling copy with man.entry
+    var entry_path as string is "{root}/{entry}"
+    var sopt0 as sopts.SemaOptions is calling sopts.default_options with (calling copy with root)
+    var sr0 as sema_api.SemaResult is calling sema_api.check_file with entry_path, sopt0
+    var src as string is "{root}/{man.src_dir}"
+    var found as list of string is calling archivum.find_files with src, true
+    var count as int is 0
+    var mods as list of string is list of string
+    for f in found:
+        if calling ends_with with f, ".pengu":
+            var relm as maybe string is calling compass.cp_relative_to with f, root
+            var rel as string is calling copy with f
+            if relm.is_present:
+                banish rel
+                set rel is calling copy with relm.value
+            banish relm
+            var md as string is calling render_file with f, rel, sr0.program
+            var nm as string is calling doc_name with rel
+            banish rel
+            var target as string is "{out}/{nm}.md"
+            calling archivum.write_text with target, md
+            var legacy as string is calling basename_no_ext with f
+            if legacy != nm:
+                var lpath as string is "{out}/{legacy}.md"
+                calling archivum.write_text with lpath, md
+                banish lpath
+            banish legacy
+            calling mods.push with (calling copy with nm)
+            banish target
+            banish nm
+            banish md
+            set count is count + 1
+        banish f
+    banish found
+    calling sema_api.free_result with (sigil of sr0)
+    var idx as string is "# API — {man.name}\n\nGenerated by `psc doc`.\n"
+    var ipath as string is "{out}/README.md"
+    calling archivum.write_text with ipath, idx
+    banish ipath
+    banish idx
+    if calling cliargs.enabled with (sigil of pr.args), "--html":
+        var hb as StringBuilder is calling StringBuilder.new
+        defer banish hb
+        calling hb.append with "<!doctype html><meta charset=\"utf-8\"><title>API "
+        calling hb.append with man.name
+        calling hb.append with "</title><h1>API "
+        calling hb.append with man.name
+        calling hb.append with "</h1><input id=q placeholder=\"filtrar…\"><ul id=l>"
+        for mn in mods:
+            calling hb.append with "<li><a href=\""
+            calling hb.append with mn
+            calling hb.append with ".md\">"
+            calling hb.append with mn
+            calling hb.append with "</a></li>"
+            banish mn
+        calling hb.append with "</ul>"
+        calling hb.append with r"<script>q.oninput=()=>{for(const li of l.children)li.style.display=li.textContent.includes(q.value)?'':'none'}</script>"
+        var htext as string is calling hb.finish
+        var hpath as string is "{out}/index.html"
+        calling archivum.write_text with hpath, htext
+        banish hpath
+        banish htext
+    banish mods
+    var msg as string is "Generated {count} module(s) in {out}"
+    calling spark.println with msg
+    banish msg
+    calling manifest.free_manifest with (sigil of man)
+    banish src
+    banish out
+    banish root
+    banish cwd
+    calling cliargs.free_parse_result with (sigil of pr)
+    return 0

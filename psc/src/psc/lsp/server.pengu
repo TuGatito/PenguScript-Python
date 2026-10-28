@@ -1,0 +1,1503 @@
+## psc/lsp/server.pengu — servidor LSP mínimo (lifecycle + diagnósticos).
+
+import std.builder
+import std.rites
+import std.chronicle
+import std.archivum
+import std.diagnostic as diag
+import std.json as json
+import std.jsonrpc as rpc
+import std.scrolls
+import std.spark
+
+import psc.lsp.positions as lpos
+import psc.lsp.transport as transport
+import psc.lsp.uri as luri
+import psc.sema.api as sema_api
+import psc.sema.names as npool
+import psc.sema.options as sopts
+
+insignia psc_lsp_server_
+
+## Documento abierto.
+rune Document:
+    text as string
+    version as int
+
+## Estado del servidor.
+rune State:
+    tr as transport.Transport
+    docs as map of string to Document
+    root as string
+    exe as string
+    ws_cache as JsonValue
+    ws_ready as bool
+    initialized as bool
+    shutdown as bool
+
+## `true` si `s` empieza por `p`.
+weave starts_with with s as string, p as string into bool:
+    var n as int is s length
+    var m as int is p length
+    if m > n:
+        return false
+    return (s at 0 to m) == p
+
+## Copia owned.
+weave copy with s as string into string:
+    return calling npool.copy_string with s
+
+## Copia un id JSON-RPC.
+weave copy_id with id as rpc.JsonRpcId into rpc.JsonRpcId:
+    var out as rpc.JsonRpcId is with Number is 0
+    judge id:
+        when Number with value ->
+            set out is with Number is value
+        when String with value ->
+            set out is with String is (calling copy with value)
+    return out
+
+## Envía un mensaje.
+weave send_msg with st as ref to State, msg as rpc.JsonRpcMessage into bool:
+    var wire as string is calling rpc.encode_message with msg
+    defer banish wire
+    return calling transport.write_frame with (sigil of st->tr), wire
+
+## Envía error de método.
+weave send_method_error with st as ref to State, id as rpc.JsonRpcId, method as string into void:
+    var err as rpc.JsonRpcError is calling rpc.error_method_not_found with method
+    var out as rpc.JsonRpcMessage is calling rpc.response_error with (calling copy_id with id), err
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## Número de severidad LSP.
+weave severity_num with sev as diag.Severity into int:
+    if sev == diag.Severity.Error:
+        return 1
+    if sev == diag.Severity.Warning:
+        return 2
+    if sev == diag.Severity.Info:
+        return 3
+    return 4
+
+## Primer span de un diagnóstico.
+weave main_span with d as diag.Diagnostic into maybe diag.Span:
+    for lb in d.labels:
+        if lb.primary:
+            return some lb.span
+    if d.labels.len > 0:
+        return some ((d.labels at 0).span)
+    return (maybe none)
+
+## Construye un diagnóstico LSP.
+weave diag_json with text as string, d as diag.Diagnostic into JsonValue:
+    var o as JsonValue is calling JsonValue.empty_object
+    var msp as maybe diag.Span is calling main_span with d
+    var start as int is 0
+    var end as int is 0
+    if msp.is_present:
+        set start is msp.value.start_byte
+        set end is msp.value.end_byte
+    calling o.put_json with "range", (calling lpos.range_json with text, start, end)
+    calling o.put_json with "severity", (calling JsonValue.int_val with ((calling severity_num with d.severity) to i64))
+    if d.code length > 0:
+        calling o.put_json with "code", (calling JsonValue.string_val with (calling copy with d.code))
+    calling o.put_json with "source", (calling JsonValue.string_val with (calling copy with "psc"))
+    calling o.put_json with "message", (calling JsonValue.string_val with (calling copy with d.message))
+    return o
+
+## Publica diagnósticos para un documento.
+## Extrae un int de un objeto.
+weave jint with v as JsonValue, key as string, dflt as int into int:
+    var f as maybe JsonValue is calling v.get with key
+    if f.is_present:
+        var fv as JsonValue is f.value
+        var i as maybe i64 is calling fv.as_int
+        banish f
+        if i.is_present:
+            return (i.value to int)
+        banish i
+    banish f
+    return dflt
+
+## Extrae un string de un objeto.
+weave jstr with v as JsonValue, key as string into string:
+    var f as maybe JsonValue is calling v.get with key
+    if f.is_present:
+        var fv as JsonValue is f.value
+        var s as maybe string is calling fv.as_string
+        banish f
+        if s.is_present:
+            var out as string is calling copy with s.value
+            banish s
+            return out
+        banish s
+    banish f
+    return ""
+
+## Convierte un diagnóstico de `psc check --diagnostics=json` a LSP.
+weave subprocess_diag with text as string, o as JsonValue into JsonValue:
+    var rng as maybe JsonValue is calling o.get with "range"
+    var out as JsonValue is calling JsonValue.empty_object
+    if rng.is_present:
+        var rv as JsonValue is rng.value
+        var st as maybe JsonValue is calling rv.get with "start"
+        var en as maybe JsonValue is calling rv.get with "end"
+        var sl as int is 0
+        var sc as int is 0
+        var el as int is 0
+        var ec as int is 0
+        if st.is_present:
+            set sl is calling jint with st.value, "line", 0
+            set sc is calling jint with st.value, "character", 0
+        if en.is_present:
+            set el is calling jint with en.value, "line", sl
+            set ec is calling jint with en.value, "character", sc
+        banish en
+        banish st
+        var so as int is (calling lpos.line_start with text, sl) + sc
+        var eo as int is (calling lpos.line_start with text, el) + ec
+        calling out.put_json with "range", (calling lpos.range_json with text, so, eo)
+        banish rng
+    else:
+        banish rng
+        calling out.put_json with "range", (calling lpos.range_json with text, 0, 0)
+    calling out.put_json with "severity", (calling JsonValue.int_val with ((calling jint with o, "severity", 1) to i64))
+    var code as string is calling jstr with o, "code"
+    if code length > 0:
+        calling out.put_json with "code", (calling JsonValue.string_val with (calling copy with code))
+    banish code
+    calling out.put_json with "source", (calling JsonValue.string_val with (calling copy with "psc"))
+    var msg as string is calling jstr with o, "message"
+    calling out.put_json with "message", (calling JsonValue.string_val with (calling copy with msg))
+    banish msg
+    return out
+
+## Publica diagnósticos usando `psc check` en un proceso hijo.
+##
+## Aísla el checker del estado del servidor (F8.0); una versión nativa in-process
+## llega en F8.1 cuando el ownership de `check_text` esté auditado.
+weave publish with st as ref to State, document_uri as string, text as string, version as int into void:
+    var base as string is calling copy with st->root
+    if base length == 0:
+        set base is "."
+    var opts as sopts.SemaOptions is calling sopts.default_options with (calling copy with base)
+    banish base
+    var path as string is calling luri.uri_to_path with document_uri
+    var sr as sema_api.SemaResult is calling sema_api.check_text with path, text, opts
+    banish path
+    var jtext as string is calling sr.program->diagnostics.render_json_utf16
+    var jp as result of JsonValue to JsonError is calling json.parse with jtext
+    banish jtext
+    var diagnostics as JsonValue is calling JsonValue.empty_array
+    if jp.is_ok:
+        var jv0 as JsonValue is jp.value
+        if calling jv0.is_array:
+            set diagnostics is jv0
+        else:
+            banish jv0
+    var params as JsonValue is calling JsonValue.empty_object
+    calling params.put_json with "uri", (calling JsonValue.string_val with (calling copy with document_uri))
+    calling params.put_json with "version", (calling JsonValue.int_val with (version to i64))
+    calling params.put_json with "diagnostics", diagnostics
+    var note as rpc.JsonRpcMessage is calling rpc.notification with "textDocument/publishDiagnostics", (some params)
+    var ok as bool is calling send_msg with st, note
+    banish note
+
+## Respuesta initialize.
+weave initialize_result into JsonValue:
+    var cap as JsonValue is calling JsonValue.empty_object
+    calling cap.put_json with "textDocumentSync", (calling JsonValue.int_val with 1)
+    calling cap.put_json with "hoverProvider", (calling JsonValue.bool_val with true)
+    calling cap.put_json with "definitionProvider", (calling JsonValue.bool_val with true)
+    calling cap.put_json with "documentSymbolProvider", (calling JsonValue.bool_val with true)
+    calling cap.put_json with "referencesProvider", (calling JsonValue.bool_val with true)
+    calling cap.put_json with "documentHighlightProvider", (calling JsonValue.bool_val with true)
+    calling cap.put_json with "foldingRangeProvider", (calling JsonValue.bool_val with true)
+    calling cap.put_json with "documentFormattingProvider", (calling JsonValue.bool_val with true)
+    calling cap.put_json with "implementationProvider", (calling JsonValue.bool_val with true)
+    calling cap.put_json with "workspaceSymbolProvider", (calling JsonValue.bool_val with true)
+    var cl as JsonValue is calling JsonValue.empty_object
+    calling cap.put_json with "codeLensProvider", cl
+    var stp as JsonValue is calling JsonValue.empty_object
+    var legend as JsonValue is calling JsonValue.empty_object
+    var ttypes as JsonValue is calling JsonValue.empty_array
+    calling ttypes.push_json with (calling JsonValue.string_val with (calling copy with "keyword"))
+    calling ttypes.push_json with (calling JsonValue.string_val with (calling copy with "type"))
+    calling ttypes.push_json with (calling JsonValue.string_val with (calling copy with "function"))
+    calling ttypes.push_json with (calling JsonValue.string_val with (calling copy with "variable"))
+    calling ttypes.push_json with (calling JsonValue.string_val with (calling copy with "string"))
+    calling ttypes.push_json with (calling JsonValue.string_val with (calling copy with "number"))
+    calling ttypes.push_json with (calling JsonValue.string_val with (calling copy with "comment"))
+    var mods as JsonValue is calling JsonValue.empty_array
+    calling legend.put_json with "tokenTypes", ttypes
+    calling legend.put_json with "tokenModifiers", mods
+    calling stp.put_json with "legend", legend
+    calling stp.put_json with "full", (calling JsonValue.bool_val with true)
+    calling cap.put_json with "semanticTokensProvider", stp
+    calling cap.put_json with "inlayHintProvider", (calling JsonValue.bool_val with true)
+    calling cap.put_json with "codeActionProvider", (calling JsonValue.bool_val with true)
+    var ot as JsonValue is calling JsonValue.empty_object
+    calling ot.put_json with "firstTriggerCharacter", (calling JsonValue.string_val with (calling copy with ":"))
+    var otm as JsonValue is calling JsonValue.empty_array
+    calling ot.put_json with "moreTriggerCharacter", otm
+    calling cap.put_json with "documentOnTypeFormattingProvider", ot
+    var sh as JsonValue is calling JsonValue.empty_object
+    var shc as JsonValue is calling JsonValue.empty_array
+    calling shc.push_json with (calling JsonValue.string_val with (calling copy with "("))
+    calling shc.push_json with (calling JsonValue.string_val with (calling copy with ","))
+    calling sh.put_json with "triggerCharacters", shc
+    calling cap.put_json with "signatureHelpProvider", sh
+    var ren as JsonValue is calling JsonValue.empty_object
+    calling ren.put_json with "prepareProvider", (calling JsonValue.bool_val with true)
+    calling cap.put_json with "renameProvider", ren
+    var comp as JsonValue is calling JsonValue.empty_object
+    calling cap.put_json with "completionProvider", comp
+    var out as JsonValue is calling JsonValue.empty_object
+    calling out.put_json with "capabilities", cap
+    var info as JsonValue is calling JsonValue.empty_object
+    calling info.put_json with "name", (calling JsonValue.string_val with (calling copy with "psc"))
+    calling info.put_json with "version", (calling JsonValue.string_val with (calling copy with "0.8.0 (F8)"))
+    calling out.put_json with "serverInfo", info
+    return out
+
+## Responde initialize.
+weave handle_initialize with st as ref to State, id as rpc.JsonRpcId, params as maybe JsonValue into void:
+    if params.is_present:
+        var rp as string is calling field_string with params.value, "rootUri"
+        if rp length > 0:
+            var rpath as string is calling luri.uri_to_path with rp
+            banish rp
+            set st->root is rpath
+        else:
+            banish rp
+    var res as JsonValue is calling initialize_result
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), res
+    var ok as bool is calling send_msg with st, out
+    banish out
+    set st->initialized is true
+
+## Responde shutdown.
+weave handle_shutdown with st as ref to State, id as rpc.JsonRpcId into void:
+    set st->shutdown is true
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), (calling JsonValue.null_value)
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## Obtiene un string de un objeto.
+weave field_string with v as JsonValue, key as string into string:
+    var f as maybe JsonValue is calling v.get with key
+    if f.is_present:
+        var fv as JsonValue is f.value
+        var s as maybe string is calling fv.as_string
+        banish f
+        if s.is_present:
+            var out as string is calling copy with s.value
+            banish s
+            return out
+        banish s
+    banish f
+    return ""
+
+## Obtiene un int de un objeto.
+weave field_int with v as JsonValue, key as string, dflt as int into int:
+    var f as maybe JsonValue is calling v.get with key
+    if f.is_present:
+        var fv2 as JsonValue is f.value
+        var i as maybe i64 is calling fv2.as_int
+        banish f
+        if i.is_present:
+            return (i.value to int)
+        banish i
+    banish f
+    return dflt
+
+## didOpen.
+weave did_open with st as ref to State, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    if not td.is_present:
+        banish td
+        return
+    var u as string is calling field_string with td.value, "uri"
+    var text as string is calling field_string with td.value, "text"
+    var ver as int is calling field_int with td.value, "version", 0
+    banish td
+    var doc as Document is with text is (calling copy with text), version is ver
+    calling st->docs.put with (calling copy with u), doc
+    set st->ws_ready is false
+    calling publish with st, u, text, ver
+    banish text
+    banish u
+
+## didChange (full sync).
+weave did_change with st as ref to State, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    if not td.is_present:
+        banish td
+        return
+    var u as string is calling field_string with td.value, "uri"
+    var ver as int is calling field_int with td.value, "version", 0
+    banish td
+    var cget as maybe JsonValue is calling params.get with "contentChanges"
+    if not cget.is_present:
+        banish cget
+        banish u
+        return
+    var cgv as JsonValue is cget.value
+    var changes as maybe list of JsonValue is calling cgv.as_array
+    banish cget
+    if changes.is_present:
+        if changes.value.len > 0:
+            var text as string is calling field_string with (changes.value at 0), "text"
+            var changed as bool is true
+            if calling st->docs.has with u:
+                var old as Document is (st->docs at u)
+                if old.text == text:
+                    set changed is false
+                else:
+                    banish old.text
+            if changed:
+                var doc as Document is with text is (calling copy with text), version is ver
+                calling st->docs.put with (calling copy with u), doc
+                set st->ws_ready is false
+                calling publish with st, u, text, ver
+            banish text
+        calling json.free_values with changes.value
+    banish u
+
+## didClose.
+weave did_close with st as ref to State, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    if not td.is_present:
+        banish td
+        return
+    var u as string is calling field_string with td.value, "uri"
+    banish td
+    if calling st->docs.has with u:
+        var old as Document is (st->docs at u)
+        banish old.text
+    var ignr as bool is calling st->docs.remove with u
+    var arr as JsonValue is calling JsonValue.empty_array
+    var p2 as JsonValue is calling JsonValue.empty_object
+    calling p2.put_json with "uri", (calling JsonValue.string_val with (calling copy with u))
+    calling p2.put_json with "diagnostics", arr
+    var note as rpc.JsonRpcMessage is calling rpc.notification with "textDocument/publishDiagnostics", (some p2)
+    var ok as bool is calling send_msg with st, note
+    banish note
+    banish u
+
+## ¿Carácter de identificador?
+weave is_word with c as int into bool:
+    return (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95
+
+## Texto del documento abierto.
+weave doc_text with st as ref to State, u as string into string:
+    if calling st->docs.has with u:
+        var d as Document is (st->docs at u)
+        return calling copy with d.text
+    var path as string is calling luri.uri_to_path with u
+    var t as maybe string is calling archivum.read_text with path
+    banish path
+    if t.is_present:
+        var out as string is calling copy with t.value
+        banish t
+        return out
+    banish t
+    return ""
+
+## Palabra bajo un offset.
+weave word_at with text as string, off as int into string:
+    var b as ref to frozen byte is bytes of text
+    var start as int is off
+    while start > 0 and calling is_word with ((b at (start - 1)) to int):
+        set start is start - 1
+    var end as int is off
+    while end < text length and calling is_word with ((b at end) to int):
+        set end is end + 1
+    return text at start to end
+
+## Línea de una declaración que contiene `word`, o `""`.
+weave decl_line with text as string, word as string into string:
+    var b as ref to frozen byte is bytes of text
+    var start as int is 0
+    while start <= text length:
+        var end as int is start
+        while end < text length and ((b at end) to int) != 10:
+            set end is end + 1
+        var line as string is text at start to end
+        var keys as list of string is list of string
+        calling keys.push with "weave "
+        calling keys.push with "rune "
+        calling keys.push with "echo "
+        calling keys.push with "omen "
+        calling keys.push with "const "
+        var hit as bool is false
+        for k in keys:
+            var needle as string is "{k}{word}"
+            if calling scrolls.contains with line, needle:
+                set hit is true
+            banish needle
+        for k in keys:
+            banish k
+        banish keys
+        if hit:
+            return line
+        banish line
+        if end >= text length:
+            break
+        set start is end + 1
+    return ""
+
+## Hover básico.
+weave handle_hover with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    var po as maybe JsonValue is calling params.get with "position"
+    var u as string is ""
+    var line as int is 0
+    var ch as int is 0
+    if td.is_present:
+        set u is calling field_string with td.value, "uri"
+    if po.is_present:
+        set line is calling field_int with po.value, "line", 0
+        set ch is calling field_int with po.value, "character", 0
+    banish po
+    banish td
+    var text as string is calling doc_text with st, u
+    var off as int is calling lpos.offset_at with text, line, ch
+    var word as string is calling word_at with text, off
+    var res as JsonValue is calling JsonValue.null_value
+    if word length > 0:
+        var dl as string is calling decl_line with text, word
+        var value as string is "**{word}**"
+        if dl length > 0:
+            set value is "```pengu\n{dl}\n```"
+        var contents as JsonValue is calling JsonValue.empty_object
+        calling contents.put_json with "kind", (calling JsonValue.string_val with (calling copy with "markdown"))
+        calling contents.put_json with "value", (calling JsonValue.string_val with (calling copy with value))
+        var hov as JsonValue is calling JsonValue.empty_object
+        calling hov.put_json with "contents", contents
+        set res is hov
+        banish value
+        banish dl
+    banish word
+    banish text
+    banish u
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), res
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## Definition básica.
+weave handle_definition with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    var po as maybe JsonValue is calling params.get with "position"
+    var u as string is ""
+    var line as int is 0
+    var ch as int is 0
+    if td.is_present:
+        set u is calling field_string with td.value, "uri"
+    if po.is_present:
+        set line is calling field_int with po.value, "line", 0
+        set ch is calling field_int with po.value, "character", 0
+    banish po
+    banish td
+    var text as string is calling doc_text with st, u
+    var off as int is calling lpos.offset_at with text, line, ch
+    var word as string is calling word_at with text, off
+    var dl as string is calling decl_line with text, word
+    var res as JsonValue is calling JsonValue.null_value
+    if dl length > 0:
+        var idx as int is calling scrolls.find with text, dl
+        if idx >= 0:
+            var loc as JsonValue is calling JsonValue.empty_object
+            calling loc.put_json with "uri", (calling JsonValue.string_val with (calling copy with u))
+            calling loc.put_json with "range", (calling lpos.range_json with text, idx, idx)
+            set res is loc
+    banish dl
+    banish word
+    banish text
+    banish u
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), res
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## Nombre declarado en una línea, o `""`.
+weave decl_name_line with line as string into string:
+    var b as ref to frozen byte is bytes of line
+    var i as int is 0
+    while i < line length and (((b at i) to int) == 32 or ((b at i) to int) == 9):
+        set i is i + 1
+    var rest as string is line at i to (line length)
+    var kw as int is 0
+    if calling starts_with with rest, "weave ":
+        set kw is 6
+    else if calling starts_with with rest, "rune ":
+        set kw is 5
+    else if calling starts_with with rest, "echo ":
+        set kw is 5
+    else if calling starts_with with rest, "omen ":
+        set kw is 5
+    else if calling starts_with with rest, "const ":
+        set kw is 6
+    if kw == 0:
+        banish rest
+        return ""
+    var rb as ref to frozen byte is bytes of rest
+    var j as int is kw
+    while j < rest length and calling is_word with ((rb at j) to int):
+        set j is j + 1
+    var nm as string is rest at kw to j
+    banish rest
+    return nm
+
+## Document symbols.
+weave handle_document_symbols with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    var u as string is ""
+    if td.is_present:
+        set u is calling field_string with td.value, "uri"
+    banish td
+    var text as string is calling doc_text with st, u
+    var arr as JsonValue is calling JsonValue.empty_array
+    var b as ref to frozen byte is bytes of text
+    var start as int is 0
+    while start <= text length:
+        var end as int is start
+        while end < text length and ((b at end) to int) != 10:
+            set end is end + 1
+        var line as string is text at start to end
+        var nm as string is calling decl_name_line with line
+        if nm length > 0:
+            var item as JsonValue is calling JsonValue.empty_object
+            calling item.put_json with "name", (calling JsonValue.string_val with (calling copy with nm))
+            calling item.put_json with "kind", (calling JsonValue.int_val with 12)
+            calling item.put_json with "range", (calling lpos.range_json with text, start, end)
+            calling item.put_json with "selectionRange", (calling lpos.range_json with text, start, start)
+            calling arr.push_json with item
+            banish nm
+        banish line
+        if end >= text length:
+            break
+        set start is end + 1
+    banish text
+    banish u
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), arr
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## Añade una completion si no existe.
+weave add_item with arr as ref to JsonValue, seen as ref to map of string to bool, w as string into void:
+    if w length == 0 or calling seen->has with w:
+        return
+    calling seen->put with (calling copy with w), true
+    var item as JsonValue is calling JsonValue.empty_object
+    calling item.put_json with "label", (calling JsonValue.string_val with (calling copy with w))
+    calling item.put_json with "kind", (calling JsonValue.int_val with 6)
+    calling arr.push_json with item
+
+## Completion básica.
+weave handle_completion with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    var u as string is ""
+    if td.is_present:
+        set u is calling field_string with td.value, "uri"
+    banish td
+    var text as string is calling doc_text with st, u
+    var arr as JsonValue is calling JsonValue.empty_array
+    var seen as map of string to bool is map of string to bool
+    var kws as list of string is list of string
+    calling kws.push with "weave"
+    calling kws.push with "rune"
+    calling kws.push with "echo"
+    calling kws.push with "omen"
+    calling kws.push with "const"
+    calling kws.push with "var"
+    calling kws.push with "let"
+    calling kws.push with "if"
+    calling kws.push with "else"
+    calling kws.push with "while"
+    calling kws.push with "for"
+    calling kws.push with "return"
+    calling kws.push with "calling"
+    for k in kws:
+        calling add_item with (sigil of arr), (sigil of seen), k
+        banish k
+    var b as ref to frozen byte is bytes of text
+    var i as int is 0
+    while i < text length:
+        if calling is_word with ((b at i) to int):
+            var s0 as int is i
+            while i < text length and calling is_word with ((b at i) to int):
+                set i is i + 1
+            var w as string is text at s0 to i
+            calling add_item with (sigil of arr), (sigil of seen), w
+            banish w
+        else:
+            set i is i + 1
+    banish seen
+    banish text
+    banish u
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), arr
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## Añade una Location de una ocurrencia.
+weave add_occurrence with arr as ref to JsonValue, text as string, u as string, start as int, end as int into void:
+    var loc as JsonValue is calling JsonValue.empty_object
+    calling loc.put_json with "uri", (calling JsonValue.string_val with (calling copy with u))
+    calling loc.put_json with "range", (calling lpos.range_json with text, start, end)
+    calling arr.push_json with loc
+
+## References.
+weave handle_references with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    var po as maybe JsonValue is calling params.get with "position"
+    var u as string is ""
+    var line as int is 0
+    var ch as int is 0
+    if td.is_present:
+        set u is calling field_string with td.value, "uri"
+    if po.is_present:
+        set line is calling field_int with po.value, "line", 0
+        set ch is calling field_int with po.value, "character", 0
+    banish po
+    banish td
+    var text as string is calling doc_text with st, u
+    var off as int is calling lpos.offset_at with text, line, ch
+    var word as string is calling word_at with text, off
+    var arr as JsonValue is calling JsonValue.empty_array
+    if word length > 0:
+        var b as ref to frozen byte is bytes of text
+        var i as int is 0
+        while i < text length:
+            if calling is_word with ((b at i) to int):
+                var s0 as int is i
+                while i < text length and calling is_word with ((b at i) to int):
+                    set i is i + 1
+                var w as string is text at s0 to i
+                if w == word:
+                    calling add_occurrence with (sigil of arr), text, u, s0, i
+                banish w
+            else:
+                set i is i + 1
+    banish word
+    banish text
+    banish u
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), arr
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## Highlight.
+weave handle_highlight with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    var po as maybe JsonValue is calling params.get with "position"
+    var u as string is ""
+    var line as int is 0
+    var ch as int is 0
+    if td.is_present:
+        set u is calling field_string with td.value, "uri"
+    if po.is_present:
+        set line is calling field_int with po.value, "line", 0
+        set ch is calling field_int with po.value, "character", 0
+    banish po
+    banish td
+    var text as string is calling doc_text with st, u
+    var off as int is calling lpos.offset_at with text, line, ch
+    var word as string is calling word_at with text, off
+    var arr as JsonValue is calling JsonValue.empty_array
+    if word length > 0:
+        var b as ref to frozen byte is bytes of text
+        var i as int is 0
+        while i < text length:
+            if calling is_word with ((b at i) to int):
+                var s0 as int is i
+                while i < text length and calling is_word with ((b at i) to int):
+                    set i is i + 1
+                var w as string is text at s0 to i
+                if w == word:
+                    var item as JsonValue is calling JsonValue.empty_object
+                    calling item.put_json with "range", (calling lpos.range_json with text, s0, i)
+                    calling item.put_json with "kind", (calling JsonValue.int_val with 1)
+                    calling arr.push_json with item
+                banish w
+            else:
+                set i is i + 1
+    banish word
+    banish text
+    banish u
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), arr
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## Indentación de una línea.
+weave indent_len with line as string into int:
+    var b as ref to frozen byte is bytes of line
+    var i as int is 0
+    while i < line length and (((b at i) to int) == 32 or ((b at i) to int) == 9):
+        set i is i + 1
+    return i
+
+## Folding por bloques con `:` e indentación.
+weave handle_folding with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    var u as string is ""
+    if td.is_present:
+        set u is calling field_string with td.value, "uri"
+    banish td
+    var text as string is calling doc_text with st, u
+    var arr as JsonValue is calling JsonValue.empty_array
+    var lines as list of string is calling text.split with "\n"
+    var i as int is 0
+    while i < lines.len:
+        var line as string is (lines at i)
+        var t as string is line
+        var b as ref to frozen byte is bytes of t
+        var e as int is t length
+        while e > 0 and (((b at (e - 1)) to int) == 32 or ((b at (e - 1)) to int) == 9):
+            set e is e - 1
+        if e > 0:
+            var base as int is calling indent_len with t
+            var next_indent as int is 0
+            if i + 1 < lines.len:
+                var nxt as string is (lines at (i + 1))
+                set next_indent is calling indent_len with nxt
+                banish nxt
+            if i + 1 < lines.len and next_indent > base:
+                var j as int is i + 1
+                var jind as int is 0
+                while j < lines.len:
+                    var jl as string is (lines at j)
+                    set jind is calling indent_len with jl
+                    banish jl
+                    if jind <= base:
+                        break
+                    set j is j + 1
+                var item as JsonValue is calling JsonValue.empty_object
+                calling item.put_json with "startLine", (calling JsonValue.int_val with (i to i64))
+                calling item.put_json with "endLine", (calling JsonValue.int_val with ((j - 1) to i64))
+                calling arr.push_json with item
+        banish t
+        banish line
+        set i is i + 1
+    banish lines
+    banish text
+    banish u
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), arr
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## Formatea con el `psc fmt` de F7.
+weave handle_formatting with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    var u as string is ""
+    if td.is_present:
+        set u is calling field_string with td.value, "uri"
+    banish td
+    var text as string is calling doc_text with st, u
+    var stamp as string is "{calling chronicle.now_ms}-{calling rites.getpid}"
+    var tmp as string is "/tmp/psc-lsp-fmt-{stamp}.pengu"
+    var out as string is "/tmp/psc-lsp-fmt-{stamp}.out"
+    var res as JsonValue is calling JsonValue.null_value
+    if calling archivum.write_text with tmp, text:
+        var cmd as string is "{st->exe} fmt --stdin < {tmp} > {out}"
+        var code as int is calling rites.exec with cmd, list of string
+        banish cmd
+        if code == 0:
+            var ot as maybe string is calling archivum.read_text with out
+            if ot.is_present:
+                if ot.value != text:
+                    var edits as JsonValue is calling JsonValue.empty_array
+                    var edit as JsonValue is calling JsonValue.empty_object
+                    calling edit.put_json with "range", (calling lpos.range_json with text, 0, text length)
+                    calling edit.put_json with "newText", (calling JsonValue.string_val with (calling copy with ot.value))
+                    calling edits.push_json with edit
+                    set res is edits
+                banish ot
+        var d1 as bool is calling archivum.delete_file with tmp
+        var d2 as bool is calling archivum.delete_file with out
+    banish tmp
+    banish out
+    banish text
+    banish u
+    var outmsg as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), res
+    var ok as bool is calling send_msg with st, outmsg
+    banish outmsg
+
+## Rename: recoge ocurrencias y produce TextEdits.
+weave handle_rename with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    var po as maybe JsonValue is calling params.get with "position"
+    var u as string is ""
+    var line as int is 0
+    var ch as int is 0
+    if td.is_present:
+        set u is calling field_string with td.value, "uri"
+    if po.is_present:
+        set line is calling field_int with po.value, "line", 0
+        set ch is calling field_int with po.value, "character", 0
+    var newname as string is calling field_string with params, "newName"
+    banish po
+    banish td
+    var text as string is calling doc_text with st, u
+    var off as int is calling lpos.offset_at with text, line, ch
+    var word as string is calling word_at with text, off
+    var res as JsonValue is calling JsonValue.null_value
+    if word length > 0 and newname length > 0:
+        var edits as JsonValue is calling JsonValue.empty_array
+        var b as ref to frozen byte is bytes of text
+        var i as int is 0
+        while i < text length:
+            if calling is_word with ((b at i) to int):
+                var s0 as int is i
+                while i < text length and calling is_word with ((b at i) to int):
+                    set i is i + 1
+                var w as string is text at s0 to i
+                if w == word:
+                    var edit as JsonValue is calling JsonValue.empty_object
+                    calling edit.put_json with "range", (calling lpos.range_json with text, s0, i)
+                    calling edit.put_json with "newText", (calling JsonValue.string_val with (calling copy with newname))
+                    calling edits.push_json with edit
+                banish w
+            else:
+                set i is i + 1
+        var changes as JsonValue is calling JsonValue.empty_object
+        calling changes.put_json with u, edits
+        var wr as JsonValue is calling JsonValue.empty_object
+        calling wr.put_json with "changes", changes
+        set res is wr
+    banish newname
+    banish word
+    banish text
+    banish u
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), res
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## Prepare rename.
+weave handle_prepare_rename with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    var po as maybe JsonValue is calling params.get with "position"
+    var u as string is ""
+    var line as int is 0
+    var ch as int is 0
+    if td.is_present:
+        set u is calling field_string with td.value, "uri"
+    if po.is_present:
+        set line is calling field_int with po.value, "line", 0
+        set ch is calling field_int with po.value, "character", 0
+    banish po
+    banish td
+    var text as string is calling doc_text with st, u
+    var off as int is calling lpos.offset_at with text, line, ch
+    var word as string is calling word_at with text, off
+    var res as JsonValue is calling JsonValue.null_value
+    if word length > 0:
+        var b as ref to frozen byte is bytes of text
+        var s0 as int is off
+        while s0 > 0 and calling is_word with ((b at (s0 - 1)) to int):
+            set s0 is s0 - 1
+        var e0 as int is off
+        while e0 < text length and calling is_word with ((b at e0) to int):
+            set e0 is e0 + 1
+        var obj as JsonValue is calling JsonValue.empty_object
+        calling obj.put_json with "range", (calling lpos.range_json with text, s0, e0)
+        calling obj.put_json with "placeholder", (calling JsonValue.string_val with (calling copy with word))
+        set res is obj
+    banish word
+    banish text
+    banish u
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), res
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## Implementation: reutiliza definition (métodos/tipos en F8.1).
+weave handle_implementation with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    calling handle_definition with st, id, params
+
+## Signature help básico desde la línea de declaración.
+weave handle_signature with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    var po as maybe JsonValue is calling params.get with "position"
+    var u as string is ""
+    var line as int is 0
+    if td.is_present:
+        set u is calling field_string with td.value, "uri"
+    if po.is_present:
+        set line is calling field_int with po.value, "line", 0
+    banish po
+    banish td
+    var text as string is calling doc_text with st, u
+    var ls as int is calling lpos.line_start with text, line
+    var le as int is ls
+    var b as ref to frozen byte is bytes of text
+    while le < text length and ((b at le) to int) != 10:
+        set le is le + 1
+    var ltext as string is text at ls to le
+    var word as string is ""
+    var wi as int is calling scrolls.find with ltext, "calling "
+    if wi >= 0:
+        var rest as string is ltext at (wi + 8) to (ltext length)
+        var sp as int is 0
+        while sp < rest length and (rest at sp to (sp + 1)) != " ":
+            set sp is sp + 1
+        set word is rest at 0 to sp
+        banish rest
+    else:
+        var wi2 as int is calling scrolls.find with ltext, " with "
+        if wi2 > 0:
+            var pre as string is ltext at 0 to wi2
+            var sp2 as int is pre length
+            while sp2 > 0 and (pre at (sp2 - 1) to sp2) != " ":
+                set sp2 is sp2 - 1
+            set word is pre at sp2 to (pre length)
+            banish pre
+    var res as JsonValue is calling JsonValue.null_value
+    if word length > 0:
+        var dl as string is calling decl_line with text, word
+        if dl length > 0:
+            var params_txt as string is ""
+            var pi as int is calling scrolls.find with dl, " with "
+            var ii as int is calling scrolls.find with dl, " into "
+            if pi >= 0 and ii > pi:
+                set params_txt is dl at (pi + 6) to ii
+            var sig as JsonValue is calling JsonValue.empty_object
+            calling sig.put_json with "label", (calling JsonValue.string_val with (calling copy with dl))
+            var pars as JsonValue is calling JsonValue.empty_array
+            if params_txt length > 0:
+                var parts as list of string is calling params_txt.split with ","
+                for part in parts:
+                    var p0 as JsonValue is calling JsonValue.empty_object
+                    calling p0.put_json with "label", (calling JsonValue.string_val with (calling copy with part))
+                    calling pars.push_json with p0
+                    banish part
+                banish parts
+            banish params_txt
+            calling sig.put_json with "parameters", pars
+            var sigs as JsonValue is calling JsonValue.empty_array
+            calling sigs.push_json with sig
+            var outv as JsonValue is calling JsonValue.empty_object
+            calling outv.put_json with "signatures", sigs
+            calling outv.put_json with "activeSignature", (calling JsonValue.int_val with 0)
+            calling outv.put_json with "activeParameter", (calling JsonValue.int_val with 0)
+            set res is outv
+            banish dl
+    banish word
+    banish ltext
+    banish text
+    banish u
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), res
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## Workspace symbols por escaneo de texto.
+weave handle_workspace_symbols with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var query as string is calling field_string with params, "query"
+    if not st->ws_ready:
+        banish st->ws_cache
+        var all as JsonValue is calling JsonValue.empty_array
+        var files as list of string is calling archivum.find_files with st->root, true
+        var count as int is 0
+        for f in files:
+            if count < 500 and calling scrolls.contains with f, ".pengu":
+                var t as maybe string is calling archivum.read_text with f
+                if t.is_present:
+                    var text as string is calling copy with t.value
+                    banish t
+                    var b as ref to frozen byte is bytes of text
+                    var start as int is 0
+                    while start <= text length and count < 500:
+                        var end as int is start
+                        while end < text length and ((b at end) to int) != 10:
+                            set end is end + 1
+                        var line as string is text at start to end
+                        var nm as string is calling decl_name_line with line
+                        if nm length > 0:
+                            var loc as JsonValue is calling JsonValue.empty_object
+                            calling loc.put_json with "uri", (calling JsonValue.string_val with (calling luri.path_to_uri with f))
+                            calling loc.put_json with "range", (calling lpos.range_json with text, start, start)
+                            var item as JsonValue is calling JsonValue.empty_object
+                            calling item.put_json with "name", (calling JsonValue.string_val with (calling copy with nm))
+                            calling item.put_json with "kind", (calling JsonValue.int_val with 12)
+                            calling item.put_json with "location", loc
+                            calling all.push_json with item
+                            set count is count + 1
+                            banish nm
+                        banish line
+                        if end >= text length:
+                            break
+                        set start is end + 1
+                    banish text
+            banish f
+        banish files
+        set st->ws_cache is all
+        set st->ws_ready is true
+    var items as maybe list of JsonValue is calling st->ws_cache.as_array
+    var arr as JsonValue is calling JsonValue.empty_array
+    if items.is_present:
+        for item in items.value:
+            var nm2 as string is calling jstr with item, "name"
+            if query length == 0 or calling scrolls.contains with nm2, query:
+                calling arr.push_json with item
+            else:
+                banish item
+            banish nm2
+        banish items.value
+    banish items
+    banish query
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), arr
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## Code lens para `main` y tests.
+weave handle_code_lens with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    var u as string is ""
+    if td.is_present:
+        set u is calling field_string with td.value, "uri"
+    banish td
+    var text as string is calling doc_text with st, u
+    var arr as JsonValue is calling JsonValue.empty_array
+    var b as ref to frozen byte is bytes of text
+    var start as int is 0
+    while start <= text length:
+        var end as int is start
+        while end < text length and ((b at end) to int) != 10:
+            set end is end + 1
+        var line as string is text at start to end
+        var title as string is ""
+        var cmdname as string is ""
+        if calling scrolls.contains with line, "weave main":
+            set title is "Run"
+            set cmdname is "psc.run"
+        else if calling scrolls.contains with line, "test ":
+            set title is "Run test"
+            set cmdname is "psc.test"
+        if title length > 0:
+            var command as JsonValue is calling JsonValue.empty_object
+            calling command.put_json with "title", (calling JsonValue.string_val with (calling copy with title))
+            calling command.put_json with "command", (calling JsonValue.string_val with (calling copy with cmdname))
+            var item as JsonValue is calling JsonValue.empty_object
+            calling item.put_json with "range", (calling lpos.range_json with text, start, end)
+            calling item.put_json with "command", command
+            calling arr.push_json with item
+        banish cmdname
+        banish title
+        banish line
+        if end >= text length:
+            break
+        set start is end + 1
+    banish text
+    banish u
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), arr
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## ¿Palabra clave?
+weave is_keyword with w as string into bool:
+    var kws as list of string is list of string
+    calling kws.push with "weave"
+    calling kws.push with "rune"
+    calling kws.push with "echo"
+    calling kws.push with "omen"
+    calling kws.push with "alias"
+    calling kws.push with "seal"
+    calling kws.push with "concept"
+    calling kws.push with "const"
+    calling kws.push with "var"
+    calling kws.push with "let"
+    calling kws.push with "if"
+    calling kws.push with "else"
+    calling kws.push with "while"
+    calling kws.push with "for"
+    calling kws.push with "return"
+    calling kws.push with "calling"
+    calling kws.push with "with"
+    calling kws.push with "into"
+    calling kws.push with "as"
+    calling kws.push with "is"
+    calling kws.push with "test"
+    calling kws.push with "import"
+    var hit as bool is false
+    for k in kws:
+        if k == w:
+            set hit is true
+    for k in kws:
+        banish k
+    banish kws
+    return hit
+
+## Estado de tokens.
+rune TokState:
+    pl as int
+    pc as int
+
+## Añade un token semántico.
+weave push_token with arr as ref to JsonValue, ts as ref to TokState, line as int, ch as int, ln as int, ty as int into void:
+    var dl as int is line - ts->pl
+    var ds as int is ch
+    if dl == 0:
+        set ds is ch - ts->pc
+    calling arr.push_json with (calling JsonValue.int_val with (dl to i64))
+    calling arr.push_json with (calling JsonValue.int_val with (ds to i64))
+    calling arr.push_json with (calling JsonValue.int_val with (ln to i64))
+    calling arr.push_json with (calling JsonValue.int_val with (ty to i64))
+    calling arr.push_json with (calling JsonValue.int_val with 0)
+    set ts->pl is line
+    set ts->pc is ch
+
+## Semantic tokens (léxico simple).
+weave handle_semantic with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    var u as string is ""
+    if td.is_present:
+        set u is calling field_string with td.value, "uri"
+    banish td
+    var text as string is calling doc_text with st, u
+    var data as JsonValue is calling JsonValue.empty_array
+    var b as ref to frozen byte is bytes of text
+    var line as int is 0
+    var start as int is 0
+    var ts as TokState is with pl is 0, pc is 0
+    while start <= text length:
+        var end as int is start
+        while end < text length and ((b at end) to int) != 10:
+            set end is end + 1
+        var ltext as string is text at start to end
+        var lb as ref to frozen byte is bytes of ltext
+        var i as int is 0
+        while i < ltext length:
+            var c as int is ((lb at i) to int)
+            if c == 35:
+                var comment as string is ltext at i to (ltext length)
+                var clen as int is calling lpos.utf16_len with comment
+                calling push_token with (sigil of data), (sigil of ts), line, i, clen, 6
+                banish comment
+                set i is ltext length
+            else if c == 34 or c == 39:
+                var q as int is i
+                set i is i + 1
+                while i < ltext length and ((lb at i) to int) != q:
+                    if ((lb at i) to int) == 92:
+                        set i is i + 1
+                    set i is i + 1
+                if i < ltext length:
+                    set i is i + 1
+                var lit as string is ltext at q to i
+                var llen as int is calling lpos.utf16_len with lit
+                calling push_token with (sigil of data), (sigil of ts), line, q, llen, 4
+                banish lit
+            else if calling is_word with c:
+                var s0 as int is i
+                while i < ltext length and calling is_word with ((lb at i) to int):
+                    set i is i + 1
+                var w as string is ltext at s0 to i
+                var ty as int is 3
+                if calling is_keyword with w:
+                    set ty is 0
+                var wlen as int is calling lpos.utf16_len with w
+                calling push_token with (sigil of data), (sigil of ts), line, s0, wlen, ty
+                banish w
+            else if c >= 48 and c <= 57:
+                var s1 as int is i
+                while i < ltext length and (((lb at i) to int) >= 48 and ((lb at i) to int) <= 57):
+                    set i is i + 1
+                var nlen as int is i - s1
+                calling push_token with (sigil of data), (sigil of ts), line, s1, nlen, 5
+            else:
+                set i is i + 1
+        banish ltext
+        if end >= text length:
+            break
+        set start is end + 1
+        set line is line + 1
+    banish text
+    banish u
+    var res as JsonValue is calling JsonValue.empty_object
+    calling res.put_json with "data", data
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), res
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## Inlay hints de tipo para `var x is <literal>`.
+weave handle_inlay with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    var u as string is ""
+    if td.is_present:
+        set u is calling field_string with td.value, "uri"
+    banish td
+    var text as string is calling doc_text with st, u
+    var arr as JsonValue is calling JsonValue.empty_array
+    var lines as list of string is calling text.split with "\n"
+    var line_no as int is 0
+    for line in lines:
+        var w as string is ""
+        var name_col as int is 0
+        var vi as int is calling scrolls.find with line, "var "
+        if vi >= 0:
+            set name_col is vi + 4
+            set w is line at (vi + 4) to (line length)
+        else:
+            var li as int is calling scrolls.find with line, "let "
+            if li >= 0:
+                set name_col is li + 4
+                set w is line at (li + 4) to (line length)
+        if w length > 0:
+            var nb as ref to frozen byte is bytes of w
+            var ne as int is 0
+            while ne < w length and calling is_word with ((nb at ne) to int):
+                set ne is ne + 1
+            if ne > 0:
+                var after as int is calling scrolls.find with w, " is "
+                if after >= 0:
+                    var expr as string is w at (after + 4) to (w length)
+                    var ty as string is ""
+                    if expr length > 0:
+                        var c0 as string is expr at 0 to 1
+                        if c0 == "\"":
+                            set ty is "string"
+                        else if c0 == "t" or c0 == "f":
+                            set ty is "bool"
+                        else if calling scrolls.contains with expr, ".":
+                            set ty is "float"
+                        else:
+                            set ty is "int"
+                        banish c0
+                    if ty length > 0:
+                        var hint as JsonValue is calling JsonValue.empty_object
+                        calling hint.put_json with "position", (calling lpos.position_json with text, (calling lpos.line_start with text, line_no) + name_col + ne)
+                        var lbl as string is ": {ty}"
+                        calling hint.put_json with "label", (calling JsonValue.string_val with (calling copy with lbl))
+                        calling arr.push_json with hint
+                        banish lbl
+                    banish expr
+            banish w
+        banish line
+        set line_no is line_no + 1
+    banish lines
+    banish text
+    banish u
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), arr
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## Code actions: por ahora "Format document".
+weave handle_code_action with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var arr as JsonValue is calling JsonValue.empty_array
+    var action as JsonValue is calling JsonValue.empty_object
+    calling action.put_json with "title", (calling JsonValue.string_val with (calling copy with "Format document"))
+    calling action.put_json with "kind", (calling JsonValue.string_val with (calling copy with "source.fixAll"))
+    var cmd as JsonValue is calling JsonValue.empty_object
+    calling cmd.put_json with "title", (calling JsonValue.string_val with (calling copy with "Format document"))
+    calling cmd.put_json with "command", (calling JsonValue.string_val with (calling copy with "editor.action.formatDocument"))
+    calling action.put_json with "command", cmd
+    calling arr.push_json with action
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), arr
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## On-type: tras ':' inserta salto e indentación.
+weave handle_on_type with st as ref to State, id as rpc.JsonRpcId, params as JsonValue into void:
+    var td as maybe JsonValue is calling params.get with "textDocument"
+    var po as maybe JsonValue is calling params.get with "position"
+    var ch as string is calling field_string with params, "ch"
+    var u as string is ""
+    var line as int is 0
+    var col as int is 0
+    if td.is_present:
+        set u is calling field_string with td.value, "uri"
+    if po.is_present:
+        set line is calling field_int with po.value, "line", 0
+        set col is calling field_int with po.value, "character", 0
+    banish po
+    banish td
+    var res as JsonValue is calling JsonValue.null_value
+    if ch == ":":
+        var text as string is calling doc_text with st, u
+        var ls as int is calling lpos.line_start with text, line
+        var b as ref to frozen byte is bytes of text
+        var ind as int is 0
+        while ls + ind < text length and (((b at (ls + ind)) to int) == 32 or ((b at (ls + ind)) to int) == 9):
+            set ind is ind + 1
+        var indent as string is ""
+        var k as int is 0
+        while k < ind + 4:
+            set indent is "{indent} "
+            set k is k + 1
+        var edit as JsonValue is calling JsonValue.empty_object
+        var off as int is calling lpos.offset_at with text, line, col
+        calling edit.put_json with "range", (calling lpos.range_json with text, off, off)
+        var nl as string is "\n{indent}"
+        calling edit.put_json with "newText", (calling JsonValue.string_val with (calling copy with nl))
+        var edits as JsonValue is calling JsonValue.empty_array
+        calling edits.push_json with edit
+        set res is edits
+        banish nl
+        banish indent
+        banish text
+    banish ch
+    banish u
+    var out as rpc.JsonRpcMessage is calling rpc.response_ok with (calling copy_id with id), res
+    var ok as bool is calling send_msg with st, out
+    banish out
+
+## Dispatch de request.
+weave handle_request with st as ref to State, id as rpc.JsonRpcId, method as string, params as maybe JsonValue into void:
+    if method == "initialize":
+        calling handle_initialize with st, id, params
+    else if method == "shutdown":
+        calling handle_shutdown with st, id
+    else if method == "textDocument/hover":
+        if params.is_present:
+            calling handle_hover with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "textDocument/definition":
+        if params.is_present:
+            calling handle_definition with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "textDocument/documentSymbol":
+        if params.is_present:
+            calling handle_document_symbols with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "textDocument/completion":
+        if params.is_present:
+            calling handle_completion with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "textDocument/references":
+        if params.is_present:
+            calling handle_references with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "textDocument/documentHighlight":
+        if params.is_present:
+            calling handle_highlight with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "textDocument/foldingRange":
+        if params.is_present:
+            calling handle_folding with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "textDocument/formatting":
+        if params.is_present:
+            calling handle_formatting with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "textDocument/rename":
+        if params.is_present:
+            calling handle_rename with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "textDocument/prepareRename":
+        if params.is_present:
+            calling handle_prepare_rename with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "textDocument/implementation":
+        if params.is_present:
+            calling handle_implementation with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "textDocument/signatureHelp":
+        if params.is_present:
+            calling handle_signature with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "workspace/symbol":
+        if params.is_present:
+            calling handle_workspace_symbols with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "textDocument/codeLens":
+        if params.is_present:
+            calling handle_code_lens with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "textDocument/semanticTokens/full":
+        if params.is_present:
+            calling handle_semantic with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "textDocument/inlayHint":
+        if params.is_present:
+            calling handle_inlay with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "textDocument/codeAction":
+        if params.is_present:
+            calling handle_code_action with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else if method == "textDocument/onTypeFormatting":
+        if params.is_present:
+            calling handle_on_type with st, id, params.value
+        else:
+            calling send_method_error with st, id, method
+    else:
+        calling send_method_error with st, id, method
+
+## Dispatch de notification.
+weave handle_notification with st as ref to State, method as string, params as maybe JsonValue into void:
+    if method == "initialized":
+        return
+    if method == "exit":
+        set st->shutdown is true
+        return
+    if method == "workspace/didChangeWatchedFiles":
+        set st->ws_ready is false
+        return
+    if method == "workspace/didChangeConfiguration":
+        return
+    if method == "$/cancelRequest":
+        return
+    if method == "textDocument/didSave":
+        return
+    if params.is_present:
+        if method == "textDocument/didOpen":
+            calling did_open with st, params.value
+        else if method == "textDocument/didChange":
+            calling did_change with st, params.value
+        else if method == "textDocument/didClose":
+            calling did_close with st, params.value
+
+## Bucle principal.
+weave run_with with tr as transport.Transport, root as string, exe as string into int:
+    var st as State is with tr is tr, docs is map of string to Document, root is root, exe is exe, ws_cache is (calling JsonValue.empty_array), ws_ready is false, initialized is false, shutdown is false
+    while true:
+        var body as maybe string is calling transport.read_frame with (sigil of st.tr)
+        if not body.is_present:
+            banish body
+            break
+        var fixed as string is calling scrolls.replace_all with body.value, r""""params":null""", r""""params":{}"""
+        var fixed2 as string is calling scrolls.replace_all with fixed, r""""params": null""", r""""params":{}"""
+        banish fixed
+        var pr as result of rpc.JsonRpcMessage to rpc.JsonRpcParseError is calling rpc.parse_message with fixed2
+        banish fixed2
+        banish body
+        if not pr.is_ok:
+            var pid as rpc.JsonRpcId is with Number is 0
+            var out as rpc.JsonRpcMessage is calling rpc.response_error with pid, (calling rpc.error_parse)
+            var okp as bool is calling send_msg with (sigil of st), out
+            banish out
+            banish pr
+            continue
+        var msg as rpc.JsonRpcMessage is pr.value
+        var ignored as int is judge msg:
+            when RpcRequest with id, method, params ->
+                calling handle_request with (sigil of st), id, method, params
+                0
+            when Notification with method, params ->
+                calling handle_notification with (sigil of st), method, params
+                0
+            when ResponseOk with id, result ->
+                0
+            when ResponseError with id, err ->
+                0
+        banish msg
+    var code as int is 1
+    if st.shutdown:
+        set code is 0
+    calling transport.close with (sigil of st.tr)
+    return code
