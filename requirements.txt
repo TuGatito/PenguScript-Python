@@ -11,7 +11,7 @@ pytest-timeout>=2.2.0
 # serial -> 4 min 31 s with `-n auto` on a 36-core box, with no test migrated.
 # `pytest -n auto` is the cheap half of the speed budget; the batch conformance
 # runner is the other half. See tests/_inventory.md §10.
-pytest-xdist>=3.5
+pytest-xdist>=3.8.0
 tomli>=2.0.0; python_version < '3.11'
 
 # Static analysis for the F821/E9 gate (undefined names are errors).
