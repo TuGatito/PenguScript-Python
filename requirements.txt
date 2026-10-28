@@ -1,5 +1,5 @@
 lark>=1.1.0
-pyyaml>=6.0
+pyyaml>=6.0.3
 pygls>=2.0.0
 lsprotocol>=2023.0.0
 pycparser>=2.21
