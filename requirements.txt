@@ -1,6 +1,6 @@
 lark>=1.1.0
 pyyaml>=6.0
-pygls>=2.0.0
+pygls>=2.1.1
 lsprotocol>=2023.0.0
 pycparser>=2.21
 pyinstaller>=6.0.0
